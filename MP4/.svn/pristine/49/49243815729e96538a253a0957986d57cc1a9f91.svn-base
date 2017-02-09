@@ -1,0 +1,18 @@
+{
+  "name": "mp4convert",
+  "version": "1.0.0",
+  "description": "MP4转码服务",
+  "main": "worker.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "request": "*",
+    "async": "*"
+  },
+  "author": "",
+  "license": "ISC"
+}

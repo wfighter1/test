@@ -1,0 +1,78 @@
+<?php
+namespace Quanshi\MP4Convert;
+
+
+use Doctrine\DBAL\Connection;
+use GuzzleHttp\Exception\RequestException;
+use Silex\Application;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+
+
+class CallbackCommand extends Command
+{
+
+    const MAX_RETRY = 3;
+
+    /**
+     * @var Connection
+     */
+    private $db;
+
+    /**
+     * @var \GuzzleHttp\Client
+     */
+    private $client;
+
+    public function __construct(Application $app)
+    {
+        parent::__construct();
+        $this->db = $app['db'];
+        $this->local_path = $app['mp4convert.local_path'];
+        $this->client = new \GuzzleHttp\Client(['timeout' => 3]);
+    }
+
+    protected function configure()
+    {
+        $this
+            ->setName('quanshi:notify_uniform')
+            ->setDescription('Notify Uniform')
+        ;
+    }
+
+
+    public function execute(InputInterface $input, OutputInterface $output)
+    {
+        $records = $this->db->fetchAll("SELECT * FROM task_queue WHERE status=1 AND calback_attempt<? ORDER BY id DESC LIMIT 100", [self::MAX_RETRY]);
+
+        if (count($records) > 0) {
+            foreach ($records as $r) {
+                $local_path = RecordService::getLocalPath($this->local_path, $r['environment'], $r['conference_id']);
+                $video_length = RecordService::getTimeTotal($local_path . "/{$r['temp_conference_id']}/1/config.xml");
+                $data = [
+                    'videoLength' => $video_length,
+                    'videoSize' => filesize($local_path . '/record.mp4'),
+                ];
+                try {
+                    $this->client->get($r['callback'], [
+                        'query' => $data,
+                    ]);
+                    $this->db->update('task_queue', ['status' => 2], ['id' => $r['id']]);
+                } catch (\Exception $ex) {
+                    $this->db->update('task_queue', ['callback_attempt' => $r['callback_attempt'] + 1], ['id' => $r['id']]);
+                }
+            }
+        } else {
+            $this->cleanup();
+            sleep(60);
+        }
+    }
+
+
+    private function cleanup()
+    {
+        $this->db->exec("DELETE FROM task_queue WHERE available_at<=?", [time() - 3600 * 24 * 90]);
+    }
+
+}

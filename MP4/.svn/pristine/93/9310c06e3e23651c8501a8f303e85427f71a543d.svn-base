@@ -1,0 +1,200 @@
+<?php
+namespace Quanshi\MP4Convert;
+
+use Silex\Application;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Filesystem\Filesystem;
+
+
+class ConvertCommand extends Command
+{
+    /**
+     * @var \Doctrine\DBAL\Connection
+     */
+    private $db;
+
+    /**
+     * @var TaskQueue
+     */
+    private $task_queue;
+
+
+    private $moyea_exe;
+    private $ffmpeg_exe;
+    private $local_resource;
+    private $local_mp4;
+    private $remote_video;
+    private $remote_xml;
+    private $remote_mp4;
+    private $base_url;
+
+
+    public function __construct(Application $app) {
+        parent::__construct();
+        $this->moyea_exe = $app['mp4convert.moyea_exe'];
+        $this->ffmpeg_exe = $app['mp4convert.ffmpeg_exe'];
+        $this->local_resource = $app['mp4convert.local_path'] . 'mps_rec';
+        $this->local_mp4 = $app['mp4convert.local_path'] . 'mp4';
+        $this->remote_video = $app['mp4convert.remote_path'] . 'wwwmps';
+        $this->remote_xml = $app['mp4convert.remote_path'] . 'flash/xml';
+        $this->remote_mp4 = $app['mp4convert.remote_path'] . 'wwwmps/mp4';
+        $this->base_url = $app['mp4convert.base_url'];
+    }
+
+
+    protected function configure()
+    {
+        $this
+            ->setName('quanshi:mp4convert')
+            ->setDescription('MP4 Convert worker process')
+        ;
+    }
+
+
+    protected function execute(InputInterface $input, OutputInterface $output)
+    {
+        set_time_limit(0);
+        while (true) {
+            $task = $this->task_queue->getTask();
+            if ($task) {
+                $local_path = $this->local_resource . 'mpsdir_' . $task['vid'];
+                if (!file_exists($local_path)) {
+                    mkdir($local_path, 0777, true);
+                }
+                if ($this->copyResources($task['vid'], $local_path)) {
+                    $time_total = $this->getTimeTotal($local_path . $task['vid'] . '/1/config.xml');
+                    if ($mp4_path = $this->convert($task['vid'], $local_path, $time_total)) {
+                        if ($this->generateM3u8($task['vid'])) {
+                            if ($this->generateThumb($task['vid'], $time_total))
+                            $client = new \GuzzleHttp\Client();
+                            $data = [
+                                'videoLength' => $time_total,
+                                'videoSize' => filesize($mp4_path),
+                                'mp4Url' => $this->base_url . '/' . $task['vid'] . '.mp4',
+                                'm3u8Url' => $this->base_url . '/' . $task['vid'] . '/index.m3u8',
+                                'thumbUrl' => $this->base_url . '/' . $task['vid'] . '.jpg',
+                            ];
+                            $resp = $client->get($task['callback'] . '?' . http_build_query($data));
+
+                            $this->task_queue->doneTask($task['vid']);
+                            continue;
+                        }
+                    }
+                }
+                $this->task_queue->failTask($task['vid']);
+            } else {
+                sleep(60);
+            }
+        }
+    }
+
+    /**
+     * 准备本地视频资源文件目录，准备完成后可以直接打开RecordPlay.swf在播放器中正常播放会议录像
+     * @param int $video_id
+     * @param string $local_path 本地视频资源目录路径
+     * @return bool
+     */
+    private function copyResources($video_id, $local_path)
+    {
+        $fs = new Filesystem();
+        $xml = <<<EOS
+<?xml version="1.0" encoding="UTF-8"?>
+<data>
+    <mpsdir>{$local_path}</mpsdir>
+    <confid>{$video_id}</confid>
+</data>
+EOS;
+        file_put_contents($xml, $local_path . '/data.xml');
+
+        // 复制视频文件
+        $fs->symlink($this->remote_video.$video_id, $local_path.'/'.$video_id.'/1', true);
+
+        //如果共享了多媒体文件，则还需要copy共享的多媒体文件
+        $multimedia = $this->remote_video . "wowza_record/$video_id";
+        if (file_exists($multimedia)) {
+            $local_multimedia = $local_path . "wowza_record/$video_id";
+            if (!mkdir($local_multimedia, 0777, true)) {
+                return false;
+            }
+            $fs->symlink($multimedia, $local_multimedia . $video_id, true);
+        }
+
+        $fs->copy($this->remote_xml.$video_id.".xml", $local_path."/".$video_id."/1/config.xml");
+        $fs->copy(APP_ROOT. "/web/RecordPlay.swf", $local_path."/RecordPlay.swf");
+        $fs->copy(APP_ROOT . "/web/framework_3.6.0.16995.swf", $local_path."/framework_3.6.0.16995.swf");
+
+        return true;
+    }
+
+    /**
+     * 执行视频转换操作
+     * @param int $video_id
+     * @param string $local_path 本地视频资源目录路径
+     * @return bool
+     */
+    private function convert($video_id, $local_path, $time_total) {
+        $fs = new Filesystem();
+        $swf_pos = $local_path . '/RecordPlay.swf';
+        $mp4_pos = $this->local_mp4 . $video_id . '.mp4';
+
+        // 调用moyea 命令行模式  参数dt表示视频持续时间，该字段必填  $status=0 表示 转换成功，其他的值参考文档。
+        exec("\"{$this->moyea_exe}\" \"{$swf_pos}\" -out \"{$mp4_pos}\" --slowspeed 1 -f mp4 -dt {$time_total}", $out, $status);
+
+        if($status == 0){
+            $fs->copy($mp4_pos, $this->remote_mp4 . $video_id . ".mp4");
+            return $mp4_pos;
+        } else {
+            return false;
+        }
+    }
+
+
+    private function generateM3u8($video_id) {
+        $fs = new Filesystem();
+        $mp4_path = $this->local_mp4 . $video_id . '.mp4';
+        $hls_path = $this->local_mp4 . $video_id;
+        mkdir($hls_path);
+        $cmd = "\"{$this->ffmpeg_exe}\" -i $mp4_path -c:v libx264 -c:a aac -hls_time 15 -hls_list_size 0 -strict -2 -f hls $hls_path/index.m3u8";
+        exec($cmd, $out, $status);
+        if ($status == 0) {
+            $fs->copy($hls_path, $this->remote_mp4);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+
+    private function generateThumb($video_id, $local_path) {
+        $fs = new Filesystem();
+        $time_total = $this->getTimeTotal($local_path . $video_id . '/1/config.xml');
+        $mp4_path = $this->local_mp4 . $video_id . '.mp4';
+        $thumb_path = $this->local_mp4 . $video_id . '-%d.jpg';
+        $pic_path = $this->local_mp4 . $video_id . '-1.jpg';
+        $offset = 10;
+
+        $cmd = "\"{$this->ffmpeg_exe}\" －ss $offset -i $mp4_path -frames 1 -f image2 -y $thumb_path";
+        exec($cmd, $out, $status);
+        if ($status == 0) {
+            $fs->copy($pic_path, $this->remote_mp4 . '/' .  $video_id . '.jpg');
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /**
+     * 从时间轴XML文件中获取视频时长
+     * @param string $xml_path
+     * @return int
+     */
+    private function getTimeTotal($xml_path){
+        $doc = new \DOMDocument();
+        $doc->load($xml_path); //读取xml文件
+        $humans = $doc->getElementsByTagName( "timeline" ); //取得humans标签的对象数组
+        $time_total = $humans->item(0)->getAttribute('timeTotal');
+        return intval($time_total);
+    }
+}

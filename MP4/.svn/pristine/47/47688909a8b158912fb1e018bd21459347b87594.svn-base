@@ -1,0 +1,46 @@
+<?php
+use Quanshi\MP4Convert\TaskQueue;
+use Silex\Provider\DoctrineServiceProvider;
+use Silex\Provider\MonologServiceProvider;
+
+require_once __DIR__.'/vendor/autoload.php';
+date_default_timezone_set('Asia/Shanghai');
+
+define('APP_ROOT', __DIR__);
+
+$dotenv = new Dotenv\Dotenv(APP_ROOT);
+$dotenv->load();
+
+\Symfony\Component\Debug\ErrorHandler::register();
+
+$app = new Silex\Application();
+
+$app['debug'] = $_ENV['DEBUG'] == '1';
+
+$app['mp4convert.local_path'] = $_ENV['LOCAL_RESOURCE'];
+$app['mp4convert.remote_path'] = [
+    'B' => $_ENV['REMOTE_RESOURCE'],
+    'C' => $_ENV['REMOTE_RESOURCE'],
+    'D' => $_ENV['REMOTE_RESOURCE'],
+    'MAX' => $_ENV['REMOTE_RESOURCE'],
+];
+
+$app['mp4convert.moyea_exe'] = $_ENV['MOYEA_EXE'];
+$app['mp4convert.ffmpeg_exe'] = $_ENV['FFMPEG_EXE'];
+
+$app->register(new DoctrineServiceProvider(), [
+    'db.options' => [
+        'url' => $_ENV['DB_DSN'],
+        'dbname' => $_ENV['DB_NAME'],
+    ]
+]);
+
+$app->register(new MonologServiceProvider(), array(
+    'monolog.logfile' => __DIR__.'/development.log',
+));
+
+$app['task_queue'] = $app->share(function($app) {
+    return new TaskQueue($app['db']);
+});
+
+return $app;

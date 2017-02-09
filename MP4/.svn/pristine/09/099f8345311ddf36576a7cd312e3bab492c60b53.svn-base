@@ -1,0 +1,47 @@
+<?php
+use Silex\Application;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+
+$app = require(__DIR__  . '/../bootstrap.php');
+
+$app->get('/', function() {
+    return "It Works!";
+});
+
+/*
+ * 提交转码任务接口
+ * tempConferenceId=&conferenceId=&startTime=1423123421&endTime=1453214321&env=D&callback=
+ */
+$app->post('/convert', function (Request $req, Application $app) {
+    $tempConferenceId = $req->get('tempConferenceId', 0);
+    $conferenceId = $req->get('conferenceId', 0);
+    $startTime = $req->get('startTime', 0);
+    $env = $req->get('env', '');
+    $callback = $req->get('callback', '');
+
+    if ($conferenceId && $tempConferenceId && $startTime && !empty($callback) && !empty($env)) {
+        $task_id = $app['task_queue']->addTask($conferenceId, $tempConferenceId, $startTime, $env, $callback);
+        return new JsonResponse(['status' => 0, 'result' => $task_id]);
+    } else {
+        return new JsonResponse(['status' => 1, 'error' => 'Missing Parameters']);
+    }
+});
+
+/*
+ * 查询转码任务状态接口
+ * conferenceId=&env=
+ */
+$app->get('/job_status.json', function(Request $req, Application $app) {
+    $conferenceId = $req->get('conferenceId', 0);
+    $env = $req->get('env', '');
+    $task = $app['task_queue']->findTask($env, $conferenceId);
+    if ($task) {
+        return new JsonResponse(['task' => $task]);
+    } else {
+        return new JsonResponse(['task' => null, 'error' => 'Not Found']);
+    }
+});
+
+
+$app->run();

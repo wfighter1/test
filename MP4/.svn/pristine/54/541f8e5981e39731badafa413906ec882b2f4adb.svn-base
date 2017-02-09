@@ -1,0 +1,790 @@
+<?php
+
+namespace Quanshi\MP4Convert;
+
+
+class TimelineModel
+{
+
+    public function generateTimeline($tempConferenceId, $layoutPath, $configPath)
+    {
+        // 获取资源文件
+        $config_struct = $this->loadResourceData($tempConferenceId, $configPath);
+        // 给视频实例加上姓名
+        $this->addName($config_struct, $tempConferenceId);
+        // 获取布局文件
+        $content = $this->loadLayoutData($layoutPath);
+        // 组装布局
+        $rs = $this->handleLayout($tempConferenceId, $content, $config_struct, $totalTime);
+        // 生成xml
+        return $this->generateXml($rs, $totalTime);
+    }
+
+    /**
+     * @param $path
+     * @return array
+     */
+    private function loadLayoutData($path)
+    {
+        $file_handle = fopen($path, "r");
+        $prev="";
+        $lineList = array();
+        while (!feof($file_handle)) {
+            $line = fgets($file_handle);
+            if($line != $prev && trim($line) !=''){
+                array_push($lineList, $line);
+                $prev = $line;
+            }
+        }
+        fclose($file_handle);
+        return $lineList;
+    }
+
+    /**
+     * @param $confId
+     * @param $path
+     * @return array
+     */
+    private function loadResourceData($conf_id, $path)
+    {
+        //定义盛放文件的数组
+        $file = array();
+
+        $cur_xml = simplexml_load_file($path);
+        //得到录制回放的业务
+        $film = (array)$cur_xml->Film;
+        $record = $film['Record'];
+        $records = array();
+
+        //将record节点弄成二维数组
+        if(is_object($record)) {
+            $records[] = $record;
+        } else {
+            $records = $record;
+        }
+        $arr_record = array();
+        foreach($records as $one_record) {
+            foreach($one_record as $val) {
+                $arr_record[] = array('startTime' => substr($val['startTime'],0,13)/1000,
+                    'endTime' => substr($val['endTime'],0,13)/1000);
+            }
+        }
+        $file['Record'] = $arr_record;
+
+        $service = $film['Service'];
+        $services = array();
+        //将service节点弄成二维数组
+        if(is_object($service)) {
+            $services[] = $service;
+        } else {
+            $services = $service;
+        }
+        foreach($services as $one_service) {
+            //业务类型
+            $type = (string)$one_service['type'];
+            $one_service = (array)$one_service;
+            //每个service下可能有movie
+            if(!isset($one_service['Movie'])) {
+                $file[$conf_id][$type] = array();
+                continue;
+            }
+            $movie = $one_service['Movie'];
+            $movies = array();
+            if(is_object($movie)) {
+                $movies[] = $movie;
+            } else {
+                $movies = $movie;
+            }
+            //得到每一页
+            foreach($movies as $one_movie) {
+                //得到该页的播放时段
+                $display = (array)$one_movie->Display;
+                $displays = array();
+                //判断有没有display节点
+                if(!isset($display['DisplayItem'])) {
+                    continue;
+                }
+                if(is_object($display['DisplayItem'])) {
+                    $f = isset($display['DisplayItem']['fileName']) ? (array)$display['DisplayItem']['fileName'] : array('');
+                    $displays[] = array('startTime' => substr($display['DisplayItem']['startTime'],0,13)/1000,
+                        'endTime' => substr($display['DisplayItem']['endTime'],0,13)/1000,
+                        'showTime' => substr($display['DisplayItem']['endTime']
+                                - $display['DisplayItem']['startTime'],0,13)/1000,
+                        'fileName' => $f[0]
+                    );
+                } else {
+                    foreach($one_movie->Display->DisplayItem as $one) {
+                        $f = isset($one['fileName']) ? (array)$one['fileName'] : array('');
+                        $displays[] = array('startTime' => substr($one['startTime'],0,13)/1000,
+                            'endTime' =>  substr($one['endTime'],0,13)/1000,
+                            'showTime' => substr($one['endTime'] - $one['startTime'],0,13)/1000,
+                            'fileName' => $f[0]
+                        );
+                    }
+                }
+
+                $commentDisplay = (array)$one_movie->CommentDisplay;
+                $commentDisplays = array();
+                if(!empty($commentDisplay)){
+                    if(is_object($commentDisplay['DisplayItem'])) {
+                        $f = isset($commentDisplay['DisplayItem']['fileName']) ? (array)$commentDisplay['DisplayItem']['fileName'] : array('');
+                        $commentDisplays[] = array(
+                            'startTime' => substr($commentDisplay['DisplayItem']['startTime'],0,13)/1000,
+                            'endTime' => substr($commentDisplay['DisplayItem']['endTime'],0,13)/1000,
+                            'fileName' => $f[0]
+                        );
+                    } else {
+                        foreach($one_movie->CommentDisplay->DisplayItem as $one) {
+                            $f = isset($one['fileName']) ? (array)$one['fileName'] : array('');
+                            $commentDisplays[] = array(
+                                'startTime' => substr($one['startTime'],0,13)/1000,
+                                'endTime' =>  substr($one['endTime'],0,13)/1000,
+                                'fileName' => $f[0]
+                            );
+                        }
+                    }
+                }
+
+
+                $file[$conf_id][$type][(string)$one_movie['groupID']][(string)$one_movie['pageID']] = array(
+                    'userID' => 0,
+                    'name' =>(string)$one_movie['name'],
+                    'groupID' =>(string)$one_movie['groupID'],
+                    'task_start' => substr($one_movie['startTime'],0,13)/1000,
+                    'task_end'	=> substr($one_movie['endTime'],0,13)/1000,
+                    'src' =>$conf_id."/1/".(string)$one_movie['src'],
+                    'display' =>$displays,
+                    'CommentDisplay' => $commentDisplays
+                );
+            }
+        }
+
+        return $file;
+    }
+
+    /**
+     * @param $confId
+     * @param $content
+     * @param $config_struct
+     * @param $totalTime
+     * @return array
+     */
+    private function handleLayout($confId, $content, $config_struct, &$totalTime)
+    {
+        $timeObj = array(
+            'start' => 0,
+            'len' => 0,
+            'stat' => 0
+        );
+        $negativeObj = array();
+        $curSpeaker = 0;
+        $curSayer = 0;
+        $curRole23List = array();
+        $curView = 0; //0 无， 1 video 3桌面视图 4白板 5文档
+        $curInst = 0;
+        $curPage = 1;
+        $patten = 0;
+        $showMini = 0;
+        $layoutType = 0;
+        $hasMini = 0;
+        $preLine = 0;
+        $nextLine = 0;
+        $curMultiMediaFileName = '';
+        $curMultiMediaPlayTime = 0;
+        $curMultiMediaPlayState = 2; //2 是暂停状态， 1是播放状态
+        $lineLayoutObj = array();
+        $layoutObj = array();
+        $_time = 0;
+        $pause_time = 0;
+        $desk_show_comment = 0;
+        $comment_id = 0;
+        foreach($content as $k=>$v){
+
+            if(trim($v) == '') break;
+            $line = explode(":", $v);
+            $_time = substr($line[0],0,13)/1000;
+            if(isset($content[$k + 1])){
+                $next_line = explode(":", $content[$k + 1]);
+                $nextTime = substr($next_line[0],0,13)/1000;
+            }else{
+                $nextTime = $config_struct['Record'][0]['endTime'];
+            }
+            $line_con = xml2array(trim($line[1]));
+            if(!$line_con['layout'] || !$line_con['layout']['type']) continue;
+            $as = array();
+            $vs = array();
+            $des = array();
+            $wbs = array();
+            $docs = array();
+            $multis = array();
+
+            log_message('task', 'content:'.json_encode($line_con));
+            $pause_flag = 0;
+            $commentTimeOrNextTime = 0;
+            switch($line_con['layout']['type']){
+                case 'start':
+                    $timeObj['start'] = $_time;
+                    $timeObj['stat'] = 1;
+
+                    $curSpeaker = $line_con['layout']['speaker'];
+                    $patten = $line_con['layout']['patten'];
+                    $curSayer = $line_con['layout']['curSayer'];
+                    if(isset($line_con['layout']['role23List'])){
+                        $role23List = $line_con['layout']['role23List'];
+                        $arr = explode(',', $role23List);
+                        foreach($arr as $v){
+                            if($v!=''){
+                                $curRole23List[] = $v;
+                            }
+                        }
+                        $curMultiMediaFileName = $line_con['layout']['multiFileName'];
+                        $curMultiMediaPlayTime = $line_con['layout']['multiPlayTime'];
+                        $_s = $line_con['layout']['multiPlayStatus'];
+                        if($_s == 'play_normal' || $_s == 'play_from_stop'){
+                            $curMultiMediaPlayState = 1;
+                        }else{
+                            $curMultiMediaPlayState = 2;
+                        }
+                    }
+                    $curInst = $line_con['layout']['curInst'];;
+                    $curPage = $line_con['layout']['curPage'];
+                    $curView = $line_con['layout']['curView'];
+                    if(isset($line_con['layout']['commentId'])){
+                        $comment_id = $line_con['layout']['commentId'];
+                        if($comment_id != 0){
+                            $desk_show_comment = 1;
+                        }
+                    }
+                    break;
+                case 'pause':
+                    $timeObj['stat'] = 0;
+                    $pause_time = $_time;
+                    $pause_flag = 1;
+                    break;
+                case 'data_show':
+                    if($line_con['layout']['tabType'] == 0){//white board
+                        $curView = 4;
+                        $curInst = $line_con['layout']['instId'];
+                        $curPage = $line_con['layout']['curPg'];
+                    }else if($line_con['layout']['tabType'] == 1){//doc
+                        $curView = 5;
+                        $curInst = $line_con['layout']['instId'];
+                        $curPage = $line_con['layout']['curPg'];
+                    }
+                    break;
+                case 'speaker_added':
+                    $curSpeaker = $line_con['layout']['userId'];
+                    break;
+                case 'video_show':
+                    $curView = 1;
+                    break;
+                case 'doc_turnpage':
+                    log_message('task', 'doc id='. $line_con['layout']['ID'].', currentPageID=' . $line_con['layout']['currentPageID']);
+                    $curInst = $line_con['layout']['ID'];
+                    $curPage = $line_con['layout']['currentPageID'];
+                    break;
+                case 'whiteboard_turnpage':
+                    $curView = 4;
+                    $curInst = $line_con['layout']['ID'];
+                    $curPage = $line_con['layout']['currentPageID'];
+                    break;
+                case 'sayer_added':
+                    $curSayer = $line_con['layout']['userId'];
+                    break;
+                case 'sayer_removed':
+                    $curSayer = $line_con['layout']['curSayer'];
+                    break;
+                case 'desktop_show':
+                    $curInst = $line_con['layout']['ID'];
+                    $curView = 3;
+                    break;
+                case 'none':
+                    $curView = 0;
+                    break;
+                case 'patten_change':
+                    $patten = $line_con['layout']['patten'];
+                    break;
+                case 'video_instance_added':
+                    break;
+                case 'desktop_comment_show':
+
+                    $desk_show_comment = 1;
+                    $comment_id = $line_con['layout']['wbId'];
+                    break;
+                case 'desktop_comment_close':
+
+                    $desk_show_comment = 0;
+                    $comment_id = 0;
+                    break;
+                case 'multi_media_inst_change':
+                    $curMultiMediaFileName = $line_con['layout']['fileName'];
+                    $curView = 6;
+                    break;
+                case 'multimedia_show':
+                    $curView = 6;
+                    break;
+                case 'multi_media_status_changed':
+                    $curView = 6;
+                    $_s = $line_con['layout']['state'];
+                    if($_s == 'play_normal' || $_s == 'play_from_stop'){
+                        $curMultiMediaPlayState = 1;
+                    }else{
+                        $curMultiMediaPlayState = 2;
+                    }
+                    $curMultiMediaPlayTime = floatval($line_con['layout']['playedTime']);
+
+                    break;
+                case 'role23_added':
+                    $curRole23List[] = $line_con['layout']['userId'];
+                    break;
+                case 'role23_removed':
+                    foreach($curRole23List as $k=>$v){
+                        if($v == $line_con['layout']['userId']){
+                            array_splice($curRole23List, $k, 1);
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+            if($line_con['layout']['type'] == 'multi_media_inst_change' || $line_con['layout']['type'] == 'multimedia_show') continue;
+            $this->handleTimeObj($timeObj, $_time, $pause_flag);
+            //如果录制状态为暂停，则
+            if($timeObj['stat'] == 0){
+                continue;
+            }
+            $timeObj['start'] = $_time;
+            log_message('task', 'curView:'.$curView);
+            if($curView == 4){//白板共享
+                $docs = $this->getData($tempConferenceId, $_time, $config_struct, 775, $curInst,$curPage, 0, $commentTimeOrNextTime, $nextTime, $negativeObj);
+            }else if($curView == 5){//文档共享
+                $wbs = $this->getData($tempConferenceId, $_time, $config_struct, 776, $curInst,$curPage, 0, $commentTimeOrNextTime, $nextTime, $negativeObj);
+            }else if($curView == 6 && $curMultiMediaFileName != ''){//多媒体共享
+                if($curMultiMediaPlayState == 1){
+                    if(!isset($line_con['layout']['playedTime']) && !isset($line_con['layout']['multiPlayTime'])){
+                        $curMultiMediaPlayTime += ($timeObj['len'] - $preLine['stime']);
+                    }
+                }
+                $multis = array(
+                    'u' => 'wowza_record/'.$tempConferenceId.'/'.$curMultiMediaFileName,
+                    's' => $curMultiMediaPlayTime,
+                    't' => 8199,
+                    'w' => '',
+                    'st' => $curMultiMediaPlayState
+                );
+            }else if($curView == 3){//桌面
+                $des = $this->getData($tempConferenceId, $_time, $config_struct, 777, $curInst, $curPage, $desk_show_comment, $commentTimeOrNextTime, $nextTime, $negativeObj);
+            }
+
+            $vs = $this->getVideoList($tempConferenceId, $_time, $patten, $config_struct, $curSpeaker, $curSayer, $curRole23List, $negativeObj);
+            $as =  $this->getData($tempConferenceId, $_time, $config_struct, 258, $curPage, 0, 0, $commentTimeOrNextTime, 0, $negativeObj);
+
+            if($showMini){
+                $layoutType = 1;
+            }
+
+
+            $arr = array();
+            foreach($vs as $v){
+                $arr[] = $v;
+            }
+            if(!empty($docs)){
+                $arr[] = $docs;
+            }
+            if(!empty($wbs)){
+                $arr[] = $wbs;
+            }
+            if(!empty($des)){
+                $arr[] = $des;
+            }
+            if(!empty($multis)){
+                $arr[] = $multis;
+            }
+
+            $data = array(
+                'l' => $layoutType,
+                'ls' => $arr,
+                'a' => $as['u'],
+                's' => $as['s']
+            );
+
+            if(round($timeObj['len']*10)!=0 && round($preLine['stime']*10) == round($timeObj['len']*10)){
+                $len = count($layoutObj);
+                $predata = $layoutObj[$preLine['stime']]['data'];
+                $lineLayoutObj['stime'] = $timeObj['len'];
+                $lineLayoutObj['data'] = $data;
+                $s = array();
+                foreach($data['ls'] as $v){
+                    if (!empty($v['u'])) {
+                        $s[] = $v['u'];
+                    }
+                }
+                foreach($predata['ls'] as $k1=>$v1){
+                    if(!empty($v1['u']) && !in_array($v1['u'], $s)){
+                        $lineLayoutObj['data']['ls'][] = $v1;
+                    }
+                }
+                $layoutObj[$preLine['stime']] =  $lineLayoutObj;
+            }else{
+                $lineLayoutObj['stime'] = $timeObj['len'];
+                $lineLayoutObj['data'] = $data;
+                $layoutObj[$lineLayoutObj['stime']] =  $lineLayoutObj;
+                $preLine = $lineLayoutObj;
+            }
+
+            $_ls = $lineLayoutObj['data']['ls'];
+            foreach($negativeObj as $k=>$v){
+                if($k < $_time) {
+                    unset($negativeObj[$k]);
+                }
+                if($k >= $_time && $k <$nextTime){
+                    $_l = $lineLayoutObj;
+                    foreach($v as $kk=>$vv){
+                        if($vv == 777){
+                            foreach($_ls as $lk=>$lv){
+                                if(isset($lv['t']) && $lv['t'] == 777) {
+                                    unset($_ls[$lk]);
+                                }
+                                if(isset($_ls[$lk]['s'])){
+                                    $_ls[$lk]['s'] +=($k-$_time);
+                                }
+                                if(isset($_ls[$lk]['ws'])){
+                                    $_ls[$lk]['ws'] +=($k-$_time);
+                                }
+                            }
+                            $des = $this->getData($tempConferenceId, $k, $config_struct, 777, $curInst, $curPage, $desk_show_comment, $commentTimeOrNextTime, $nextTime, $negativeObj);
+                            if(!empty($des)){
+                                $_ls[] = $des;
+                            }
+                        }else if($vv == 259){
+                            foreach($_ls as $lk=>$lv){
+                                if(isset($lv['t']) && $lv['t'] == 259) {
+                                    unset($_ls[$lk]);
+                                }
+                                if(isset($_ls[$lk]['s'])){
+                                    $_ls[$lk]['s'] +=($k-$_time);
+                                }
+                                if(isset($_ls[$lk]['ws'])){
+                                    $_ls[$lk]['ws'] +=($k-$_time);
+                                }
+                            }
+                            $vs = $this->getVideoList($tempConferenceId, $k, $patten, $config_struct, $curSpeaker, $curSayer, $curRole23List, $negativeObj);
+                            foreach($vs as $vvv){
+                                if(!empty($vvv)){
+                                    $_ls[] = $vvv;
+                                }
+                            }
+                        }else{
+                            $_ls[$k]['s'] +=($k-$_time);
+                            if(isset($_ls[$k]['ws'])){
+                                $_ls[$k]['ws'] +=($k-$_time);
+                            }
+                        }
+                    }
+                    sort($_ls);
+                    $_l['stime'] += ($k-$_time);
+                    $_l['data']['s'] += ($k-$_time);
+                    if(!empty($_ls)){
+                        $_l['data']['ls'] = $_ls;
+                        $layoutObj[$_l['stime']] =  $_l;
+                    }
+                }
+            }
+
+
+            log_message('task', '====='.json_encode($lineLayoutObj['data']['ls']));
+            while($commentTimeOrNextTime){
+                $t = $commentTimeOrNextTime;
+                $diff = $t - $_time;
+                foreach($lineLayoutObj['data']['ls'] as $k=>$v){
+                    log_message('task', '----'.$v['t']);
+                    if($v['t'] != 775 && $v['t'] != 776 && $v['t'] != 777){
+                        $lineLayoutObj['data']['ls'][$k]['s'] += $diff;
+                    }else{
+                        if($curView == 4){//白板共享
+                            $l = $config_struct[$tempConferenceId][775];
+                            $commentDisplay = $l[$curInst][$curPage]['display'];
+                            $wArr = $this->getComment($commentDisplay, $_time, $nextTime, $commentTimeOrNextTime, $tempConferenceId);
+                            if(!empty($wArr)){
+                                $w = $wArr['w'];
+                                $_ws = $wArr['ws'];
+                                $lineLayoutObj['data']['ls'][$k]['s'] = $_ws;
+                                $lineLayoutObj['data']['ls'][$k]['u'] = $w;
+                            }
+                        }else{
+                            $type = 776;
+                            if($curView == 5){
+                                $type == 776;
+                            }else if($curView == 3){
+                                $type = 777;
+                                $curPage = 1;
+                            }else{
+                                continue;
+                            }
+                            $l = $config_struct[$tempConferenceId][$type];
+                            $commentDisplay = $l[$curInst][$curPage]['CommentDisplay'];
+                            $wArr = $this->getComment($commentDisplay, $_time, $nextTime, $commentTimeOrNextTime, $tempConferenceId);
+                            if(!empty($wArr)){
+                                $w = $wArr['w'];
+                                $_ws = $wArr['ws'];
+                                if($type == 776){
+                                    $lineLayoutObj['data']['ls'][$k]['s'] = $_ws;
+                                }
+                                $lineLayoutObj['data']['ls'][$k]['ws'] = $_ws;
+                                $lineLayoutObj['data']['ls'][$k]['w'] = $w;
+                            }
+                        }
+                    }
+
+                }
+                $lineLayoutObj['data']['s'] += $diff;
+                $layoutObj[$lineLayoutObj['stime']] =  $lineLayoutObj;
+                $preLine = $lineLayoutObj;
+                if($commentTimeOrNextTime == $t) break;
+            }
+        }
+        if($timeObj['stat'] != 0){
+            $len = $timeObj['len'] + $config_struct['Record'][0]['endTime'] - $timeObj['start'];
+        }else{
+            $len = $timeObj['len'];
+        }
+
+        log_message('task', 'len=' . $timeObj['len'] . ', confEndTime='.$config_struct['Record'][0]['endTime']. ', timeObj start='. $timeObj['start']);
+        $this->CI->record_model->update('meet_record', array('lengthFinal'=>$len), array('tempConferenceId'=>$tempConferenceId));
+
+        $totalTime = $len;
+        sort($layoutObj);
+        return $layoutObj;
+    }
+
+    /**
+     * @param $data
+     * @param $totalTime
+     * @return string
+     */
+    private function generateXml($data, $totalTime)
+    {
+
+    }
+
+    /**
+     * @param $config_struct
+     * @param $tempConferenceId
+     */
+    private function addName($config_struct, $tempConferenceId)
+    {
+        $instances = $this->CI->conference_model->get('meet_video_instance', 'instanceId, tempUserId, name',array('tempConferenceId'=>$tempConferenceId));
+        foreach($instances as $key=>$value){
+            $this->userObj[$value['tempUserId']] = $value['name'];
+        }
+        if(!empty($config_struct[$tempConferenceId]) && !empty($config_struct[$tempConferenceId][259])){
+            foreach($config_struct[$tempConferenceId][259] as $k => $v){
+                foreach($instances as $key=>$value){
+                    if($value['instanceId'] == $v[0]['groupID']){
+                        $config_struct[$tempConferenceId][259][$k][0]['name'] = $value['name'];
+                        $config_struct[$tempConferenceId][259][$k][0]['userID'] = $value['tempUserId'];
+                    }
+                }
+            }
+        }
+    }
+
+
+
+
+    /**
+     * 处理时间对象
+     * @param $timeObj
+     * @param $time
+     */
+    function handleTimeObj(&$timeObj, $time, $pause_flag){
+        if($timeObj['stat'] == 1 || $pause_flag == 1){
+            $timeObj['len'] += $time - $timeObj['start'];
+            $timeObj['start'] = $time;
+        }
+        log_message('task', 'timeObj: ' . json_encode($timeObj));
+    }
+
+    /**
+     * 获取视频播放列表
+     * @param $tempConferenceId
+     * @param $time
+     * @param $patten
+     * @param $config_struct
+     * @param int $curSpeaker
+     * @param int $curSayer
+     * @return array
+     */
+    function getVideoList($tempConferenceId, $time, $patten, &$config_struct, $curSpeaker=0,$curSayer=0, $curRole23List=array(), &$negativeObj){
+        $vs = array();
+        if (empty($config_struct[$tempConferenceId][259])) {
+            return $vs;
+        }
+        $l = $config_struct[$tempConferenceId][259];
+        foreach($l as $k=>$v){
+            if($time >= $v[0]['task_start'] && $time <= $v[0]['task_end']){
+                $r = 6;
+                $main_user = true;
+                if($curSpeaker!=0 && $curSpeaker==(int)$v[0]['userID']){
+                    $r = 5;
+                } else if($curSayer != 0 && $curSayer == (int)$v[0]['userID']){
+                    $r = 21;
+                } else if(!empty($curRole23List) && in_array((int)$v[0]['userID'], $curRole23List)){
+                    $r = 6;
+                } else {
+                    $main_user = false;
+                }
+                $s = $time - $v[0]['display'][0]['startTime'];
+
+                if($s < -1){
+                    $t = $v[0]['display'][0]['startTime'];
+                    $negativeObj[$t][] = 259;
+                    $ds = array();
+                }else{
+                    $ds = array(
+                        'u' => $tempConferenceId . '/1/video/' . $v[0]['groupID'] . '.flv',
+                        's' => $s,
+                        't' => 259,
+                        'w' => '',
+                        'n' => $v[0]['name'],
+                        'r' => $r
+                    );
+                }
+
+                if(intval($patten) == 1 && $main_user){//大方
+                    array_push($vs, $ds);
+                }else{
+                    array_push($vs, $ds);
+                }
+            }
+        }
+
+        return $vs;
+
+    }
+
+    /**
+     * 获取音频，文档，白板，桌面的播放对象
+     * @param $tempConferenceId
+     * @param $time
+     * @param $config_struct
+     * @param $type
+     * @param $instId
+     * @param $curPg
+     * @return array
+     */
+    function getData($tempConferenceId, $time, &$config_struct, $type, $instId ,$curPg, $desk_show_comment, &$commentTimeOrNextTime, $nextTime, &$negativeObj){
+        $l = $config_struct[$tempConferenceId][$type];
+        $ds = array();
+        if($type == 258){
+            $_a = array_keys($config_struct[$tempConferenceId][258]);
+            $instId = $_a[0];
+            $u = $tempConferenceId . '/1/audio/' . $instId . '.flv';
+            $s = $time - $l[$instId][1]['display'][0]['startTime'];
+            $w = '';
+            $ds = array(
+                'u' => $u,
+                's' => $s,
+                't' => $type,
+                'w' => $w
+            );
+        }else {
+            if($type == 777){
+                $_a = array_keys($config_struct[$tempConferenceId][777]);
+                if (empty($instId)) $instId = $_a[0];
+                $u = $tempConferenceId . '/1/desktop/' . $instId . '.flv';
+                $_st = $l[$instId][1]['display'][0]['startTime'];
+                $s = $time - $_st;
+                $commentDisplay = $l[$instId][1]['CommentDisplay'];
+                if($desk_show_comment == 1){
+                    $wArr = $this->getComment($commentDisplay, $type, $time, $nextTime, $commentTimeOrNextTime, $tempConferenceId);
+                    $w = $wArr['w'];
+                    $_ws = $wArr['ws'];
+                }else{
+                    $w = '';
+                    $_ws = 0;
+                }
+                if($s < -1){
+                    $negativeObj[intval($_st)][] = $type;
+                }else{
+                    $ds = array(
+                        'u' => $u,
+                        's' => $s,
+                        't' => $type,
+                        'w' => $w,
+                        'ws' => $_ws
+                    );
+                }
+
+            } else if (isset($l[$instId]) && isset($l[$instId][$curPg])){
+                if($type == 776){//doc
+                    $u = $tempConferenceId . '/1/docshare/' . $instId . '_' . $curPg . '.swf';
+                    $s = $time -  $l[$instId][$curPg]['task_start'];
+                    $commentDisplay = $l[$instId][$curPg]['CommentDisplay'];
+                    $wArr = $this->getComment($commentDisplay, $time, $nextTime, $commentTimeOrNextTime, $tempConferenceId);
+                    $w = $wArr['w'];
+                    $_ws = $wArr['ws'];
+                    $ds = array(
+                        'u' => $u,
+                        's' => $_ws,
+                        't' => $type,
+                        'w' => $w,
+                        'ws' => $_ws
+                    );
+                }else if($type == 775){
+                    $u = '';
+                    $commentDisplay = $l[$instId][$curPg]['display'];
+                    $wArr = $this->getComment($commentDisplay, $time, $nextTime, $commentTimeOrNextTime, $tempConferenceId);
+                    $w = $wArr['w'];
+                    $_ws = $wArr['ws'];
+                    $ds = array(
+                        'u' => $u,
+                        's' => $_ws,
+                        't' => $type,
+                        'w' => $w
+                    );
+                }
+            }
+        }
+        return $ds;
+    }
+
+    function getComment($commentDisplay, $time, $nextTime, &$commentTimeOrNextTime, $tempConferenceId){
+        $wArr = array('w' => '', 'ws' => 0);
+        if(!isset($commentDisplay[0])) return $wArr;
+        $s = $commentDisplay[0]['startTime'];
+        $wArr['ws'] = $time - $s;
+        $len = count($commentDisplay);
+        foreach($commentDisplay as $k=>$v){
+            if($k > 0 && $v['startTime'] < $nextTime){
+                if($commentTimeOrNextTime == 0 && $k!=$len-1){
+                    $commentTimeOrNextTime = $v['startTime'];
+                }else{
+                    if($commentTimeOrNextTime < $v['startTime']){
+                        $commentTimeOrNextTime = $v['startTime'];
+                    }else{
+                        $commentTimeOrNextTime = 0;
+                    }
+                }
+            }else{
+                $commentTimeOrNextTime = 0;
+            }
+            if($time <= $v['startTime'] && $wArr['w'] == ''){
+                if($k > 0){
+                    $wArr['w'] = $tempConferenceId . '/1/' . $commentDisplay[$k-1]['fileName'];
+                    continue;
+                }else{
+                    $wArr['w'] = $tempConferenceId . '/1/' . $commentDisplay[$k]['fileName'];
+                    continue;
+                }
+            }
+            if($k == $len -1 && $wArr['w']==''){
+                $wArr['w'] = $tempConferenceId . '/1/' . $commentDisplay[$k]['fileName'];
+                $wArr['ws'] = $time - $s;
+                continue;
+            }
+        }
+        return $wArr;
+    }
+
+}

@@ -1,0 +1,33 @@
+<?php
+use Silex\Application;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use Symfony\Component\HttpFoundation\Request;
+
+$app = require(__DIR__  . '/../bootstrap.php');
+
+$app->post('/convert', function (Request $req, Application $app) {
+    $vid = $req->get('id', 0);
+    $video_length = $req->get('length', 0);
+    $callback = $req->get('callback', '');
+
+    if ($vid && $video_length > 0 && !empty($callback)) {
+        $task_id = $app['task_queue']->addTask($vid, $video_length, $callback);
+        return new JsonResponse(['status' => 0, 'result' => $task_id]);
+    } else {
+        return new JsonResponse(['status' => 1, 'error' => 'Missing Parameters']);
+    }
+});
+
+
+$app->get('/job_status.json', function(Request $req, Application $app) {
+    $vid = $req->get('id', 0);
+    $task = $app['task_queue']->findTask($vid);
+    if ($task) {
+        return new JsonResponse(['task' => $task]);
+    } else {
+        return new JsonResponse(['task' => null, 'error' => 'Not Found']);
+    }
+});
+
+
+$app->run();

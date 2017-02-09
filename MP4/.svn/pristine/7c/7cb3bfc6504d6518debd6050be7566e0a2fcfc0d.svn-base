@@ -1,0 +1,144 @@
+<?php
+namespace Quanshi\MP4Convert;
+
+
+use Doctrine\DBAL\Connection;
+use Psr\Log\LoggerInterface;
+
+
+/**
+ * TaskQueue using mysql table
+ *
+ *
+ *
+ * @package Quanshi\MP4Convert
+ */
+class TaskQueue
+{
+    const MAX_RETRY = 3;
+    const MIN_RETRY_DELAY = 3600;
+
+    /**
+     * @var Connection
+     */
+    private $db;
+
+    /**
+     * @var LoggerInterface
+     */
+    private $logger;
+
+
+    public function __construct(Connection $db, LoggerInterface $logger)
+    {
+        $this->db = $db;
+        $this->logger = $logger;
+    }
+
+    /**
+     *
+     * @param int $conferenceId 会议ID
+     * @param int $tempConferenceId 临时会议ID
+     * @param int $startTime 会议开始时间
+     * @param int $endTime 会议结束时间
+     * @param string $env 会议来自多套环境(A,B,C,D,MAX)
+     * @param string $callback 回调通知uniform地址
+     * @return int 任务ID
+     * @throws \Exception
+     */
+    public function addTask($conferenceId, $tempConferenceId, $startTime, $endTime, $env, $callback)
+    {
+        $exist = $this->db->fetchAssoc("SELECT id FROM task_queue WHERE conference_id=? AND environment=?",
+                [$conferenceId, $env]);
+        if ($exist) {
+            return $exist['id'];
+        }
+        $this->db->insert('task_queue', [
+            'conference_id' => $conferenceId,
+            'temp_conference_id' => $tempConferenceId,
+            'environment' => $env,
+            'callback_url' => $callback,
+            'conference_length' => $endTime - $startTime,
+            'create_at' => $startTime,
+            'available_at' => time(),
+            'attempt' => 0,
+            'status' => 0,
+        ]);
+        return $this->db->lastInsertId();
+    }
+
+    /**
+     * 从队列获取一个任务
+     * @return array
+     */
+    public function getTask()
+    {
+        $this->db->beginTransaction();
+        try {
+            $sql = "SELECT * FROM task_queue WHERE available_at<=? AND status=0 AND attempt<? ORDER BY available_at ASC LIMIT 1";
+            $task = $this->db->fetchAssoc($sql, [time(), self::MAX_RETRY]);
+            if ($task) {
+                $retry_interval= max($task['conference_length'] * 2, self::MIN_RETRY_DELAY);
+                $this->db->update('task_queue', [
+                    'available_at' => time() + $retry_interval,
+                    'start_at' => time(),
+                    'end_at' => 0,
+                    'attempt' => $task['attempt'] + 1
+                ], ['id' => $task['id']]);
+                $this->db->commit();
+                return $task;
+            } else {
+                $this->db->rollBack();
+                return null;
+            }
+        } catch (\Exception $ex) {
+            $this->logger->error("getTask Failed: " . $ex->getMessage());
+            $this->db->rollBack();
+            return null;
+        }
+    }
+
+    /**
+     * 获得任务信息，返回给调用转码服务的应用
+     * @param string $env
+     * @param int $conferenceId
+     * @return array
+     */
+    public function findTask($env, $conferenceId)
+    {
+        $task = $this->db->fetchAssoc("SELECT * FROM task_queue WHERE environment=? AND conference_id=?", [$env, $conferenceId]);
+        return $task;
+    }
+
+    /**
+     * 完成一个任务
+     * @param int $task_id
+     * @return boolean
+     */
+    public function doneTask($task_id)
+    {
+        $rows = $this->db->update('task_queue', [
+            'end_at' => time(),
+            'status' => 1,
+        ], ['id' => $task_id]);
+        return $rows > 0;
+    }
+
+    /**
+     * 标记一个任务为失败
+     * @param int $task_id
+     * @return boolean
+     */
+    public function failTask($task_id)
+    {
+        $rows = $this->db->update('task_queue', [
+            'available_at' => time(),
+            'start_at' => 0,
+            'end_at' => 0,
+            'status' => 0,
+        ], ['id' => $task_id]);
+        return $rows > 0;
+    }
+
+}
+

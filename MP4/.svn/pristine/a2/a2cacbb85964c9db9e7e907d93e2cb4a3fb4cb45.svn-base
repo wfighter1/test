@@ -1,0 +1,14 @@
+var child_process = require('child_process');
+
+function start() {
+    var child = child_process.exec('php console.php quanshi:mp4convert');
+    child.on('exit', function(err) {
+        console.log(err);
+        console.log('Worker died, restarting');
+        start();
+    })
+}
+
+for (var i = 0; i < 5; i++) {
+    start();
+}

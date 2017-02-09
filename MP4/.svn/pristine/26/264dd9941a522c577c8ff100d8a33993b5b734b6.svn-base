@@ -1,0 +1,13 @@
+DEBUG=0
+
+MOYEA_EXE=C:\Program Files\Moyea\SWF to Video SDK\swf2videocmd.exe
+FFMPEG_EXE=C:\ffmpeg\bin\ffmpeg.exe
+
+DB_DSN=mysql://127.0.0.1:3600
+DB_NAME=mp4convert
+
+LOCAL_RESOURCE=C:\mps_rec
+
+REMOTE_RESOURCE_C=\\172.31.36.199\pc2_3\
+REMOTE_RESOURCE_D=\\172.31.69.8\pc2d_mps\mps_data\
+REMOTE_RESOURCE_MAX=

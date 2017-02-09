@@ -1,0 +1,165 @@
+<?php
+namespace Quanshi\MP4Convert;
+
+
+use Doctrine\DBAL\Connection;
+
+
+/**
+ * TaskQueue using mysql table
+ *
+ *
+ *
+ * @package Quanshi\MP4Convert
+ */
+class TaskQueue
+{
+    const MAX_RETRY = 3;
+    const MIN_RETRY_DELAY = 3600;
+
+    /**
+     * @var Connection
+     */
+    private $db;
+
+    private $download_secret;
+
+    private $download_base_url;
+
+
+    public function __construct($db, $base_url, $secret)
+    {
+        $this->db = $db;
+        $this->download_base_url = $base_url;
+        $this->download_secret = $secret;
+    }
+
+    /**
+     * @param int $videoId
+     * @param int $video_length
+     * @param string $callback
+     * @return bool
+     */
+    public function addTask($videoId, $video_length, $callback)
+    {
+        try {
+            $this->db->insert('task_queue', [
+                'id' => $videoId,
+                'video_length' => $video_length,
+                'callback_url' => $callback,
+                'create_at' => time(),
+                'available_at' => time(),
+            ]);
+            return true;
+        } catch (\Exception $ex) {
+            if (strpos($ex->getMessage(), 'Duplicate entry') !== false) {
+                return true;
+            }
+            throw $ex;
+        }
+    }
+
+    /**
+     * @return array
+     */
+    public function getTask()
+    {
+        $this->db->beginTransaction();
+        try {
+            $sql = "SELECT * FROM task_queue WHERE available_at<=? AND status=0 AND attempt<? ORDER BY available_at DESC LIMIT 1";
+            $task = $this->db->fetchAssoc($sql, [time(), self::MAX_RETRY]);
+            if ($task) {
+                $retry_interval= max($task['video_length'] * 2, self::MIN_RETRY_DELAY);
+                $this->db->update('task_queue', [
+                    'available_at' => time() + $retry_interval,
+                    'start_at' => time(),
+                    'end_at' => 0,
+                    'attempt' => $task['attempt'] + 1
+                ], ['id' => $task['id']]);
+            }
+            $this->db->commit();
+            return $task;
+        } catch (\Exception $ex) {
+            $this->db->rollBack();
+            return null;
+        }
+    }
+
+    /**
+     * 获得任务信息，返回给调用转码服务的应用
+     * @param $videoId
+     * @return array
+     */
+    public function findTask($videoId)
+    {
+        $task = $this->db->fetchAssoc('SELECT * FROM task_queue WHERE id=?', [$videoId]);
+        if ($task['status'] == 1) {
+            $task['download_url'] = $this->getDownloadUrl($videoId);
+        }
+        return $task;
+    }
+
+    /**
+     * @param int $videoId
+     * @return boolean
+     */
+    public function doneTask($videoId)
+    {
+        $this->db->beginTransaction();
+        try {
+            $task = $this->db->fetchAssoc('SELECT * FROM task_queue WHERE id=?', [$videoId]);
+            if ($task && $task['status'] == 0) {
+                $this->db->update('task_queue', [
+                    'end_at' => time(),
+                    'status' => 1,
+                ], ['id' => $task['id']]);
+            }
+            $this->db->commit();
+            return true;
+        } catch (\Exception $ex) {
+            $this->db->rollBack();
+            return false;
+        }
+    }
+
+    /**
+     * @param int $videoId
+     * @return boolean
+     */
+    public function failTask($videoId)
+    {
+        $this->db->beginTransaction();
+        try {
+            $task = $this->db->fetchAssoc('SELECT * FROM task_queue WHERE id=?', [$videoId]);
+            if ($task) {
+                $this->db->update('task_queue', [
+                    'available_at' => time(),
+                    'start_at' => 0,
+                    'end_at' => 0,
+                    'status' => 0,
+                ], ['id' => $task['id']]);
+            }
+            $this->db->commit();
+            return true;
+        } catch (\Exception $ex) {
+            $this->db->rollBack();
+            return false;
+        }
+    }
+
+    /**
+     * Nginx Secure Link
+     * 密码设置需要和nginx中的配置一致
+     *
+     * @param $videoId
+     * @return string
+     */
+    private function getDownloadUrl($videoId) {
+        $base_url = "";
+        $secret = "";
+        $mp4_path = "/{$videoId}.mp4";
+        $hash = md5($mp4_path . $secret);
+        return "$base_url/download/$hash/$mp4_path";
+    }
+}
+
